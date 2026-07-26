@@ -1,0 +1,17 @@
+# Tells Netlify where the serverless function lives.
+# Place this file at the ROOT of the site you deploy, next to your HTML.
+# If your HTML sits in a subfolder, set `publish` to that folder.
+
+[build]
+  publish = "."
+
+[functions]
+  directory = "netlify/functions"
+
+# Serve the app at the site root ("/") without changing the URL, so Stripe's
+# post-payment redirect to "/?premium=success" lands on the app instead of a 404.
+# (status 200 = rewrite, not a visible redirect; the ?premium=success is preserved.)
+[[redirects]]
+  from = "/"
+  to = "/study-studio.html"
+  status = 200

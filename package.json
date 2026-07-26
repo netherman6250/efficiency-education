@@ -1,0 +1,9 @@
+{
+  "name": "efficiency-education-functions",
+  "private": true,
+  "version": "1.0.0",
+  "description": "Serverless functions for Efficiency Education (Stripe premium, device verification, admin auth).",
+  "dependencies": {
+    "@netlify/blobs": "^8.1.0"
+  }
+}
