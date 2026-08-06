@@ -18,12 +18,12 @@ const crypto = require("crypto");
 
 const ADMIN_KEY = "admin_cred";
 const sha = (s) => crypto.createHash("sha256").update(String(s)).digest("hex");
-// strong consistency: a read always reflects the latest write (so a freshly-set
-// admin password is seen immediately on the next request).
-const store = () => getStore({ name: "efficiency-education", consistency: "strong" });
+const store = () => getStore("efficiency-education");
 
 async function getJSON(s, key) {
-  try { return await s.get(key, { type: "json" }); } catch (e) { return null; }
+  // strong consistency: a read always reflects the latest write (so a freshly-set
+  // admin password is seen immediately on the next request).
+  try { return await s.get(key, { type: "json", consistency: "strong" }); } catch (e) { return null; }
 }
 function ok(headers, obj) { return { statusCode: 200, headers, body: JSON.stringify(obj) }; }
 // Constant-length comparison (hash both sides so lengths always match).

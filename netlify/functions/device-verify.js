@@ -25,14 +25,14 @@ const RESEND_COOLDOWN_MS = 60 * 1000;  // don't re-send within 60s
 const MAX_ATTEMPTS = 5;                // wrong-code attempts before the code is burned
 
 const sha = (s) => crypto.createHash("sha256").update(String(s)).digest("hex");
-// strong consistency: a read always reflects the latest write (required so a
-// second device is reliably seen as "not first").
-const store = () => getStore({ name: "efficiency-education", consistency: "strong" });
+const store = () => getStore("efficiency-education");
 const devKey = (email) => "dev_" + sha(email);
 const codeKey = (email, deviceId) => "code_" + sha(email) + "_" + deviceId;
 
 async function getJSON(s, key) {
-  try { return await s.get(key, { type: "json" }); } catch (e) { return null; }
+  // strong consistency: a read always reflects the latest write (so a second
+  // device is reliably seen as "not first").
+  try { return await s.get(key, { type: "json", consistency: "strong" }); } catch (e) { return null; }
 }
 function ok(headers, obj) { return { statusCode: 200, headers, body: JSON.stringify(obj) }; }
 function safeEq(a, b) {
