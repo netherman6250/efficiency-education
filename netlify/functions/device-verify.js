@@ -17,7 +17,7 @@
 // only as a salted SHA-256 hash and expires after 10 minutes.
 // -----------------------------------------------------------------------------
 
-const { getStore } = require("@netlify/blobs");
+const { getStore, connectLambda } = require("@netlify/blobs");
 const crypto = require("crypto");
 
 const CODE_TTL_MS = 10 * 60 * 1000;    // code valid for 10 minutes
@@ -39,6 +39,7 @@ function safeEq(a, b) {
 }
 
 exports.handler = async (event) => {
+  connectLambda(event);   // required for Netlify Blobs in a classic (event) handler
   const headers = { "Content-Type": "application/json", "Cache-Control": "no-store" };
 
   if (event.httpMethod !== "POST")

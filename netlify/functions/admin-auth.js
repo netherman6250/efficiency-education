@@ -13,7 +13,7 @@
 // Only a SHA-256 hash of the password is stored.
 // -----------------------------------------------------------------------------
 
-const { getStore } = require("@netlify/blobs");
+const { getStore, connectLambda } = require("@netlify/blobs");
 const crypto = require("crypto");
 
 const ADMIN_KEY = "admin_cred";
@@ -31,6 +31,7 @@ function safeEqHashed(a, b) {
 }
 
 exports.handler = async (event) => {
+  connectLambda(event);   // required for Netlify Blobs in a classic (event) handler
   const headers = { "Content-Type": "application/json", "Cache-Control": "no-store" };
 
   if (event.httpMethod !== "POST")
