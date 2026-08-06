@@ -51,6 +51,19 @@ exports.handler = async (event) => {
   try { body = JSON.parse(event.body || "{}"); } catch (e) {}
 
   const action = String(body.action || "");
+
+  // TEMP diagnostic: writes a probe blob then reads it back, reporting any error.
+  if (action === "diag") {
+    const out = { hasEventBlobs: !!(event && event.blobs), writeErr: null, readBack: null, readErr: null };
+    try {
+      const s2 = store();
+      await s2.setJSON("diag_probe", { t: Date.now() });
+      try { out.readBack = await s2.get("diag_probe", { type: "json", consistency: "strong" }); }
+      catch (e) { out.readErr = String((e && e.message) || e); }
+    } catch (e) { out.writeErr = String((e && e.message) || e); }
+    return ok(headers, out);
+  }
+
   const email = (body.email || "").trim().toLowerCase();
   const deviceId = String(body.deviceId || "").replace(/[^a-zA-Z0-9]/g, "").slice(0, 64);
 
