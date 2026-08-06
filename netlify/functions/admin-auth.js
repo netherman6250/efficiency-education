@@ -18,7 +18,9 @@ const crypto = require("crypto");
 
 const ADMIN_KEY = "admin_cred";
 const sha = (s) => crypto.createHash("sha256").update(String(s)).digest("hex");
-const store = () => getStore("efficiency-education");
+// strong consistency: a read always reflects the latest write (so a freshly-set
+// admin password is seen immediately on the next request).
+const store = () => getStore({ name: "efficiency-education", consistency: "strong" });
 
 async function getJSON(s, key) {
   try { return await s.get(key, { type: "json" }); } catch (e) { return null; }

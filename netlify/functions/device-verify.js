@@ -25,7 +25,9 @@ const RESEND_COOLDOWN_MS = 60 * 1000;  // don't re-send within 60s
 const MAX_ATTEMPTS = 5;                // wrong-code attempts before the code is burned
 
 const sha = (s) => crypto.createHash("sha256").update(String(s)).digest("hex");
-const store = () => getStore("efficiency-education");
+// strong consistency: a read always reflects the latest write (required so a
+// second device is reliably seen as "not first").
+const store = () => getStore({ name: "efficiency-education", consistency: "strong" });
 const devKey = (email) => "dev_" + sha(email);
 const codeKey = (email, deviceId) => "code_" + sha(email) + "_" + deviceId;
 
