@@ -1325,10 +1325,17 @@ async function baseList(prefix){
 async function sharedSet(k,v){ if(hasStore){ try{ await window.storage.set(k,v,true); }catch(e){} } }
 async function sharedGet(k){ if(hasStore){ try{ const r=await window.storage.get(k,true); return r&&r.value?r.value:null; }catch(e){ return null; } } return null; }
 async function sharedList(prefix){ if(hasStore){ try{ const r=await window.storage.list(prefix,true); return (r&&r.keys)||[]; }catch(e){ return []; } } return []; }
+/* Central visitor log (server-backed, cross-device). Only signed-in users are
+   logged — guests have no email to key on. */
+const VISITORS_API = "/.netlify/functions/visitors";
+let adminPassword = "";                        // held in memory after admin login, authorizes the visitor list
 async function logVisit(label, stats){
-  if(!hasStore) return;                       // cross-browser log only works with Claude shared storage
-  const id=(label||"guest").toLowerCase();
-  await sharedSet(VISITOR_PREFIX+id, JSON.stringify({label:label||"Guest", lastActive:Date.now(), ...(stats||{})}));
+  const email=(label||"").trim();
+  if(!email || email.indexOf("@")<0) return;
+  try{
+    await fetch(VISITORS_API,{method:"POST",headers:{"Content-Type":"application/json"},
+      body:JSON.stringify({action:"log", email, stats:stats||{}})});
+  }catch(e){}
 }
 function dataKeyFor(email){ return KEY + "::" + email.trim().toLowerCase(); }
 function validEmail(e){ return /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test((e||"").trim()); }
@@ -1389,7 +1396,7 @@ async function submitAdminSet(){
   if(p1.length<6){ authError="Choose a password of at least 6 characters."; render(); return; }
   if(p1!==p2){ authError="The two passwords don't match."; render(); return; }
   const r=await adminSetRemote(secret, p1);
-  if(r.ok){ authError=""; authStep="email"; signIn(authEmailPending); }
+  if(r.ok){ authError=""; adminPassword=p1; authStep="email"; signIn(authEmailPending); }
   else if(r.error==="bad_secret"){ authError="That setup secret is incorrect."; render(); }
   else if(r.error==="weak"){ authError="Choose a password of at least 6 characters."; render(); }
   else if(r.error==="not_configured"){ authError="Admin setup isn't configured on the server (missing ADMIN_BOOTSTRAP_SECRET)."; render(); }
@@ -1398,7 +1405,7 @@ async function submitAdminSet(){
 async function submitAdminEnter(){
   const p=document.getElementById("adminPw")?.value||"";
   const r=await adminVerifyRemote(p);
-  if(r.ok){ authError=""; authStep="email"; signIn(authEmailPending); }
+  if(r.ok){ authError=""; adminPassword=p; authStep="email"; signIn(authEmailPending); }
   else if(r.error==="unreachable"){ authError="Couldn't reach the admin service. Try again."; render(); }
   else { authError="Incorrect password."; render(); }
 }
@@ -1410,9 +1417,9 @@ async function signIn(email){
   activeKey = dataKeyFor(email);
   if(rememberSession) await baseSet(SESSION_KEY, JSON.stringify({email}));
   else await baseDel(SESSION_KEY);          // don't stay signed in → no auto-resume next open
-  await touchRegistry(email);
   await loadActive();
   await verifyPremium({force:true});                 // ask Stripe whether this email is actually a subscriber
+  await touchRegistry(email);                        // log the visit after progress + premium are known
   if(pendingUpgrade){
     try{ history.replaceState({}, "", location.pathname); }catch(e){}
     pendingUpgrade=false;
@@ -1439,40 +1446,28 @@ async function signOut(){
 }
 function showAuth(){ authStep="email"; view="auth"; render(); }
 
-/* admin: local profiles (with progress) + shared visitors seen on any browser */
+/* admin: central visitor list pulled from the server (every device). Requires
+   the admin password held in memory since login. */
 async function loadAllProfiles(){
-  const prefix = KEY + "::";
-  const keys = await baseList(prefix);
-  let reg={}; const r=await baseGet(REG_KEY); if(r){ try{ reg=JSON.parse(r); }catch(e){} }
-  const sessEmail = (profile.email||"").toLowerCase();
   const now = Date.now();
-  const byEmail = {};
-  for(const k of keys){
-    const fullKey = k.indexOf(prefix)===0 ? k : prefix+k;
-    const email   = k.indexOf(prefix)===0 ? k.slice(prefix.length) : k;
-    const raw = await baseGet(fullKey); if(!raw) continue;
-    let data; try{ data=JSON.parse(raw); }catch(e){ continue; }
-    const attempts = data.attempts||[];
-    const accs = attempts.map(a=>a.accuracy);
-    const avg = accs.length ? Math.round(accs.reduce((s,x)=>s+x,0)/accs.length) : null;
-    byEmail[email.toLowerCase()] = {
-      email, sets:(data.sets||[]).filter(s=>s.kind==="custom").length, attempts:attempts.length, avg,
-      lastActive: reg[email.toLowerCase()]?.lastActive || null,
-      online: email.toLowerCase()===sessEmail, here:true
-    };
-  }
-  // merge shared visitors (other browsers/devices), progress isn't shared, so those show as visits only
-  const vkeys = await sharedList(VISITOR_PREFIX);
-  for(const k of vkeys){
-    const raw = await sharedGet(k.indexOf(VISITOR_PREFIX)===0 ? k : VISITOR_PREFIX+k); if(!raw) continue;
-    let v; try{ v=JSON.parse(raw); }catch(e){ continue; }
-    const key=(v.label||"").toLowerCase();
-    if(byEmail[key]){ byEmail[key].lastActive = Math.max(byEmail[key].lastActive||0, v.lastActive||0); }
-    else byEmail[key] = { email:v.label||"Visitor", sets:(v.sets!=null?v.sets:null), attempts:(v.attempts!=null?v.attempts:null), avg:(v.avg!=null?v.avg:null), premium:!!v.premium, lastActive:v.lastActive||null, online:false, here:false };
-  }
-  const rows = Object.values(byEmail).map(row=>({ ...row, online: row.online || (row.lastActive && (now-row.lastActive)<120000) }));
-  rows.sort((a,b)=> (b.online-a.online) || ((b.lastActive||0)-(a.lastActive||0)));
-  return rows;
+  const me = (profile.email||"").toLowerCase();
+  try{
+    const res = await fetch(VISITORS_API, {method:"POST", headers:{"Content-Type":"application/json"},
+      body: JSON.stringify({action:"list", password: adminPassword||""})});
+    const d = await res.json();
+    if(d && d.ok && Array.isArray(d.visitors)){
+      const rows = d.visitors.map(v=>({
+        email: v.email,
+        sets: v.sets, attempts: v.attempts, avg: v.avg, premium: !!v.premium,
+        lastActive: v.lastActive || null,
+        online: !!(v.lastActive && (now - v.lastActive) < 120000),
+        here: (v.email||"").toLowerCase()===me
+      }));
+      rows.sort((a,b)=> (b.online-a.online) || ((b.lastActive||0)-(a.lastActive||0)));
+      return rows;
+    }
+  }catch(e){}
+  return [];
 }
 
 /* ============================ seed ============================ */
@@ -3091,7 +3086,7 @@ function viewAdmin(rows){
   <div class="head">
     <div class="eyebrow">Admin</div>
     <h1>Everyone who's visited</h1>
-    <p>Profiles saved on this device, plus anyone who's signed in from another browser.</p>
+    <p>Everyone who has signed in, across all their devices.</p>
   </div>
   <div class="strip">
     <div class="stat"><div class="k">Visitors</div><div class="v">${rows.length}</div></div>
@@ -3099,7 +3094,7 @@ function viewAdmin(rows){
     <div class="stat"><div class="k">Other devices</div><div class="v">${other}</div></div>
   </div>
   ${body}
-  <div class="note" style="margin-top:14px">Full progress (custom sets, sessions, accuracy) is shown for profiles saved on <b>this</b> browser. Visitors from other browsers appear as visits with their last-active time, their detailed progress stays on their own device. ${hasStore?"":"Cross-browser tracking needs Claude's shared storage, so it's unavailable in a downloaded copy."}</div>`;
+  <div class="note" style="margin-top:14px">This list is stored on the server, so it includes people on <b>any</b> device. It shows each person's email, activity and last-active time; their detailed question-by-question progress still lives on their own device.</div>`;
 }
 
 /* ============================ HOME ============================ */
