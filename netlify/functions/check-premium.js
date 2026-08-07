@@ -102,7 +102,10 @@ exports.handler = async (event) => {
           active: true,
           plan,
           status: sub.status,
-          currentPeriodEnd: (sub.current_period_end || 0) * 1000, // seconds → ms
+          // Newer Stripe API versions moved current_period_end onto the
+          // subscription item, so fall back to the item's value.
+          currentPeriodEnd:
+            (sub.current_period_end || (item && item.current_period_end) || 0) * 1000, // seconds → ms
         }),
       };
     }
