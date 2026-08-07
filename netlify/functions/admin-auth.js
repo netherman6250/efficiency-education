@@ -21,9 +21,9 @@ const sha = (s) => crypto.createHash("sha256").update(String(s)).digest("hex");
 const store = () => getStore("efficiency-education");
 
 async function getJSON(s, key) {
-  // strong consistency: a read always reflects the latest write (so a freshly-set
-  // admin password is seen immediately on the next request).
-  try { return await s.get(key, { type: "json", consistency: "strong" }); } catch (e) { return null; }
+  // Eventual consistency (the classic-function environment doesn't support strong
+  // reads). Fine here: admin verify/login happens long after the one-time set.
+  try { return await s.get(key, { type: "json" }); } catch (e) { return null; }
 }
 function ok(headers, obj) { return { statusCode: 200, headers, body: JSON.stringify(obj) }; }
 // Constant-length comparison (hash both sides so lengths always match).
