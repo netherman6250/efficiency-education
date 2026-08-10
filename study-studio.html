@@ -116,6 +116,9 @@
   .modalbg{position:fixed;inset:0;z-index:80;background:rgba(20,24,45,.55);backdrop-filter:blur(3px);display:grid;place-items:center;padding:20px;animation:fadein .2s}
   @keyframes fadein{from{opacity:0}to{opacity:1}}
   .modal{background:var(--card);border-radius:22px;padding:32px;max-width:620px;width:100%;box-shadow:0 30px 80px rgba(0,0,0,.35);position:relative;max-height:92vh;overflow:auto}
+  .feedbackfab{position:fixed;left:16px;bottom:16px;z-index:70;display:inline-flex;align-items:center;gap:6px;background:var(--ai);color:#fff;border:none;border-radius:999px;padding:10px 16px;font-size:13.5px;font-weight:700;cursor:pointer;box-shadow:0 8px 24px rgba(124,77,219,.35)}
+  .feedbackfab:hover{filter:brightness(1.07)}
+  @media (max-width:820px){ .feedbackfab{bottom:calc(84px + env(safe-area-inset-bottom, 0px))} }
   .modalx{position:absolute;top:16px;right:16px;width:34px;height:34px;border-radius:10px;color:var(--muted);font-size:16px}
   .modalx:hover{background:var(--paper)}
   .plans{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:12px;margin:6px 0}
@@ -748,6 +751,7 @@
 <div id="cornerToast"></div>
 <div id="celebrate"></div>
 <div id="focusPop"></div>
+<button class="feedbackfab" id="feedbackFab" onclick="openFeedback()" style="display:none">💬 Feedback</button>
 <button class="guestbar" id="guestBar" onclick="showAuth()">Guest mode, progress will not save · <b>Sign in</b></button>
 
 <script>
@@ -980,6 +984,9 @@ let _premTimer = null;
    being shared by email alone. */
 const DEVICE_API = "/.netlify/functions/device-verify";
 const ADMIN_API  = "/.netlify/functions/admin-auth";
+// New-device email verification. OFF for launch (needs Resend able to email
+// customers — a verified domain). Flip to true once that's set up.
+const DEVICE_VERIFY_ENABLED = false;
 const DEVICE_KEY = "study_studio_device";
 let deviceGate = null;                      // { email } while this device awaits a code
 function getDeviceId(){
@@ -1081,20 +1088,22 @@ async function verifyPremium({retries=0, quiet=true, force=false}={}){
   }
 
   if(data.active){
-    // Stripe says active — but premium unlocks on this device only once it's trusted.
-    const dev = await checkDevice(profile.email);
-    if(!dev.trusted){
-      const firstGate = !deviceGate;
-      deviceGate = { email: profile.email };
-      S.premium = { active:false, source:"stripe_pending",
-        plan: data.plan || prev.plan || "web",
-        currentPeriodEnd: data.currentPeriodEnd || null,
-        trialStart: prev.trialStart||null, trialNotified: prev.trialNotified||false,
-        lastCheck: Date.now() };
-      await save();
-      if(firstGate){ requestDeviceCode(); showDeviceVerify(); }   // send + prompt once
-      render();
-      return;
+    // New-device verification — only when enabled (needs Resend able to email customers).
+    if(DEVICE_VERIFY_ENABLED){
+      const dev = await checkDevice(profile.email);
+      if(!dev.trusted){
+        const firstGate = !deviceGate;
+        deviceGate = { email: profile.email };
+        S.premium = { active:false, source:"stripe_pending",
+          plan: data.plan || prev.plan || "web",
+          currentPeriodEnd: data.currentPeriodEnd || null,
+          trialStart: prev.trialStart||null, trialNotified: prev.trialNotified||false,
+          lastCheck: Date.now() };
+        await save();
+        if(firstGate){ requestDeviceCode(); showDeviceVerify(); }   // send + prompt once
+        render();
+        return;
+      }
     }
     deviceGate = null;
     S.premium = { ...prev, active:true, source:"stripe",
@@ -1336,6 +1345,45 @@ async function logVisit(label, stats){
     await fetch(VISITORS_API,{method:"POST",headers:{"Content-Type":"application/json"},
       body:JSON.stringify({action:"log", email, stats:stats||{}})});
   }catch(e){}
+}
+
+/* ── feedback ──────────────────────────────────────────────────────────────
+   A floating "Feedback" button anyone can use; messages go to the server and
+   show up on the Admin page. */
+const FEEDBACK_API = "/.netlify/functions/feedback";
+function openFeedback(){
+  const root=document.getElementById("modalRoot"); if(!root) return;
+  const who=(profile&&profile.email)?profile.email:"anonymous";
+  root.innerHTML=`<div class="modalbg" onclick="if(event.target===this)closeFeedback()">
+    <div class="modal" style="max-width:480px">
+      <button class="modalx" aria-label="Close" onclick="closeFeedback()">✕</button>
+      <h1 style="font-size:24px;margin:0 0 4px">Send feedback</h1>
+      <p style="color:var(--muted);font-size:14px;margin:0 0 16px">Found a bug or have an idea? Tell us — it goes straight to the team.</p>
+      <div class="field"><label>Your message</label>
+        <textarea id="fbMsg" rows="5" placeholder="What's on your mind?" style="width:100%;resize:vertical;font:inherit;padding:10px 12px;border-radius:10px;border:1.5px solid var(--line);background:var(--card);color:var(--ink)"></textarea></div>
+      <button class="btn wide" onclick="sendFeedback()">Send feedback</button>
+      <p class="note" style="text-align:center;margin-top:10px">Sent as ${esc(who)}.</p>
+    </div></div>`;
+  const el=document.getElementById("fbMsg"); if(el) el.focus();
+}
+function closeFeedback(){ const root=document.getElementById("modalRoot"); if(root) root.innerHTML=""; }
+async function sendFeedback(){
+  const msg=(document.getElementById("fbMsg")?.value||"").trim();
+  if(msg.length<2){ toast("Please write a little more."); return; }
+  try{
+    await fetch(FEEDBACK_API,{method:"POST",headers:{"Content-Type":"application/json"},
+      body:JSON.stringify({action:"submit", email:(profile&&profile.email)||"", message:msg})});
+    closeFeedback(); toast("Thanks! Your feedback was sent. 💜");
+  }catch(e){ toast("Couldn't send just now. Please try again."); }
+}
+async function loadFeedback(){
+  try{
+    const res=await fetch(FEEDBACK_API,{method:"POST",headers:{"Content-Type":"application/json"},
+      body:JSON.stringify({action:"list", password: adminPassword||""})});
+    const d=await res.json();
+    if(d&&d.ok&&Array.isArray(d.feedback)) return d.feedback;
+  }catch(e){}
+  return [];
 }
 function dataKeyFor(email){ return KEY + "::" + email.trim().toLowerCase(); }
 function validEmail(e){ return /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test((e||"").trim()); }
@@ -2905,9 +2953,11 @@ function render(){
   const gb = document.getElementById("guestBar");
   const foot = document.getElementById("sideFoot");
 
+  const fab=document.getElementById("feedbackFab");
   if(view==="auth"){
     app.classList.add("noside");
     if(gb) gb.style.display="none";
+    if(fab) fab.style.display="none";
     document.getElementById("main").innerHTML = viewAuth();
     const focusId = authStep==="email" ? "authEmail" : "adminPw";
     const el=document.getElementById(focusId);
@@ -2918,6 +2968,7 @@ function render(){
   }
   app.classList.remove("noside");
   if(gb) gb.style.display = profile.guest ? "block" : "none";
+  if(fab) fab.style.display = "";
   const na=document.getElementById("navAdmin"); if(na) na.style.display = profile.admin ? "" : "none";
   if(foot){
     const soundBtn = `<button class="soundtog" onclick="toggleSound()" title="${soundOn?"Sound on":"Sound off"}">${soundOn?"🔊":"🔇"} <span>Sound ${soundOn?"on":"off"}</span></button>`;
@@ -3061,11 +3112,12 @@ function relTime(ts){
 }
 async function renderAdmin(){
   const rows = await loadAllProfiles();
+  const fb = await loadFeedback();
   if(view!=="admin"){ stopTipRotation(); return; }
   stopTipRotation();
-  document.getElementById("main").innerHTML = viewAdmin(rows);
+  document.getElementById("main").innerHTML = viewAdmin(rows, fb);
 }
-function viewAdmin(rows){
+function viewAdmin(rows, fb){
   const online = rows.filter(r=>r.online).length;
   const other = rows.filter(r=>!r.here).length;
   const body = rows.length ? `
@@ -3094,7 +3146,13 @@ function viewAdmin(rows){
     <div class="stat"><div class="k">Other devices</div><div class="v">${other}</div></div>
   </div>
   ${body}
-  <div class="note" style="margin-top:14px">This list is stored on the server, so it includes people on <b>any</b> device. It shows each person's email, activity and last-active time; their detailed question-by-question progress still lives on their own device.</div>`;
+  <div class="note" style="margin-top:14px">This list is stored on the server, so it includes people on <b>any</b> device. It shows each person's email, activity and last-active time; their detailed question-by-question progress still lives on their own device.</div>
+  <div class="head" style="margin-top:34px"><div class="eyebrow">Feedback</div><h1>What people are saying</h1></div>
+  ${(fb&&fb.length) ? `<div class="reviewlist">${fb.map(f=>`
+    <div class="reviewitem">
+      <div class="rvhead"><span class="rvq">${esc(f.message||"")}</span></div>
+      <div class="rvopts"><div class="rvopt">${esc(f.email||"anonymous")} · ${relTime(f.date)}</div></div>
+    </div>`).join("")}</div>` : `<div class="empty"><h3>No feedback yet</h3><p>Messages sent from the Feedback button appear here.</p></div>`}`;
 }
 
 /* ============================ HOME ============================ */
