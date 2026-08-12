@@ -1371,10 +1371,11 @@ async function sendFeedback(){
   const msg=(document.getElementById("fbMsg")?.value||"").trim();
   if(msg.length<2){ toast("Please write a little more."); return; }
   try{
-    await fetch(FEEDBACK_API,{method:"POST",headers:{"Content-Type":"application/json"},
-      body:JSON.stringify({action:"submit", email:(profile&&profile.email)||"", message:msg})});
-    closeFeedback(); toast("Thanks! Your feedback was sent. 💜");
-  }catch(e){ toast("Couldn't send just now. Please try again."); }
+    const r=await (await apiPost(FEEDBACK_API,{action:"submit", email:(profile&&profile.email)||"", message:msg})).json();
+    if(r&&r.ok){ closeFeedback(); toast("Thanks! Your feedback was sent. 💜"); }
+    else if(r&&r.error==="restricted"){ closeFeedback(); toast("Your account is restricted from sending feedback."); }
+    else toast("Couldn't send just now. Please try again.");
+  }catch(e){ if(e.message!=="rate_limited") toast("Couldn't send just now. Please try again."); }
 }
 async function loadFeedback(){
   try{
@@ -1384,6 +1385,137 @@ async function loadFeedback(){
     if(d&&d.ok&&Array.isArray(d.feedback)) return d.feedback;
   }catch(e){}
   return [];
+}
+
+/* ── shared sets, account bans, anti-abuse ───────────────────────────────── */
+const SETS_API = "/.netlify/functions/sets";
+let accountRestricted = false;   // true if the server says this account is banned
+
+/* Full-screen "there's an issue" notice (shown when the server rate-limits us). */
+function issueScreen(msg){
+  const el=document.getElementById("focusPop"); if(!el) return;
+  el.innerHTML=`<div class="focusbg"><div class="focuscard">
+    <div class="focusemoji">⚠️</div>
+    <h2 style="font-size:22px;margin:6px 0 4px">There seems to be an issue</h2>
+    <p style="color:var(--muted);font-size:14px;margin:0 0 18px">${esc(msg||"")}</p>
+    <button class="btn wide" onclick="document.getElementById('focusPop').innerHTML=''">OK</button>
+  </div></div>`;
+}
+/* POST wrapper that surfaces rate-limiting (HTTP 429) as the issue screen. */
+async function apiPost(url, body){
+  const res = await fetch(url,{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify(body)});
+  if(res.status===429){
+    issueScreen("You're doing that too quickly, or unusual traffic is coming from this device. Please wait a minute and try again.");
+    throw new Error("rate_limited");
+  }
+  return res;
+}
+async function refreshBanStatus(){
+  if(!profile||!profile.email){ accountRestricted=false; return; }
+  try{ const r=await (await apiPost(SETS_API,{action:"status", email:profile.email})).json();
+    accountRestricted = !!(r&&r.banned);
+  }catch(e){}
+}
+
+/* --- sharing a custom set --- */
+function cardsForSet(setId){
+  const set=S.sets.find(s=>s.id===setId); if(!set) return null;
+  const cards=questionsFor(set).map(q=>({prompt:q.prompt, answer:q.answer||"", subject:q.subject||set.subject}));
+  return {name:set.name, subject:set.subject, cards};
+}
+async function shareSet(setId){
+  if(accountRestricted){ toast("Your account is restricted from sharing."); return; }
+  const payload=cardsForSet(setId);
+  if(!payload || !payload.cards.length){ toast("Nothing to share in this set."); return; }
+  toast("Sharing…");
+  try{
+    const r=await (await apiPost(SETS_API,{action:"publish", email:(profile&&profile.email)||"", name:payload.name, subject:payload.subject, cards:payload.cards})).json();
+    if(r.ok){ showShareCode(r.code, payload.name); }
+    else if(r.error==="restricted"){ accountRestricted=true; toast("Your account is restricted from sharing."); }
+    else toast("Couldn't share just now. Try again.");
+  }catch(e){ if(e.message!=="rate_limited") toast("Couldn't share just now. Try again."); }
+}
+function showShareCode(code, name){
+  const root=document.getElementById("modalRoot"); if(!root) return;
+  const link = location.origin + location.pathname + "?set=" + code;
+  root.innerHTML=`<div class="modalbg" onclick="if(event.target===this)closeShare()">
+    <div class="modal" style="max-width:460px">
+      <button class="modalx" aria-label="Close" onclick="closeShare()">✕</button>
+      <h1 style="font-size:24px;margin:0 0 4px">Set shared 🎉</h1>
+      <p style="color:var(--muted);font-size:14px;margin:0 0 16px">Anyone can add <b>${esc(name)}</b> with this code or link.</p>
+      <div class="field"><label>Share code</label>
+        <input id="shareCode" readonly value="${esc(code)}" onclick="this.select()" style="font:700 20px 'Space Mono',monospace;text-align:center;letter-spacing:3px"></div>
+      <div class="field"><label>Share link</label>
+        <input id="shareLink" readonly value="${esc(link)}" onclick="this.select()"></div>
+      <button class="btn wide" onclick="copyShare()">Copy link</button>
+    </div></div>`;
+}
+function closeShare(){ const root=document.getElementById("modalRoot"); if(root) root.innerHTML=""; }
+function copyShare(){
+  const el=document.getElementById("shareLink"); if(!el) return; el.select();
+  try{ navigator.clipboard.writeText(el.value); toast("Link copied"); }
+  catch(e){ try{ document.execCommand("copy"); toast("Link copied"); }catch(_){} }
+}
+
+/* --- importing a shared set --- */
+function openImport(prefill){
+  const root=document.getElementById("modalRoot"); if(!root) return;
+  root.innerHTML=`<div class="modalbg" onclick="if(event.target===this)closeShare()">
+    <div class="modal" style="max-width:440px">
+      <button class="modalx" aria-label="Close" onclick="closeShare()">✕</button>
+      <h1 style="font-size:24px;margin:0 0 4px">Add a shared set</h1>
+      <p style="color:var(--muted);font-size:14px;margin:0 0 16px">Enter a share code someone gave you.</p>
+      <div class="field"><label>Share code</label>
+        <input id="importCode" placeholder="e.g. 4F9K2A" value="${esc(prefill||"")}" style="text-transform:uppercase;letter-spacing:2px"></div>
+      <button class="btn wide" onclick="importSet(document.getElementById('importCode').value)">Add set</button>
+    </div></div>`;
+  const el=document.getElementById("importCode"); if(el) el.focus();
+}
+async function importSet(code){
+  code=(code||"").trim().toUpperCase();
+  if(!code){ toast("Enter a code."); return; }
+  try{
+    const r=await (await apiPost(SETS_API,{action:"get", code})).json();
+    if(!r.ok || !r.set){ toast(r.error==="not_found"?"No set found for that code.":"Couldn't find that set."); return; }
+    if(!S.questions) S.questions=[]; if(!S.sets) S.sets=[];
+    const ids=r.set.cards.map(c=>{
+      const nq=newQuestion(String(c.prompt||"").trim(), String(c.answer||"").trim(), c.subject||r.set.subject||"General", "shared");
+      S.questions.push(nq); return nq.id;
+    });
+    S.sets.push({id:uid(), name:(r.set.name||"Shared set")+" (shared)", subject:r.set.subject||"General", kind:"custom", path:["My topics"], createdAt:Date.now(), questionIds:ids});
+    await save(); closeShare(); toast("Set added to your library!"); go("library");
+  }catch(e){ if(e.message!=="rate_limited") toast("Couldn't add that set. Try again."); }
+}
+
+/* --- admin: ban / unban an account --- */
+async function banUser(email, ban){
+  try{
+    const r=await (await apiPost(VISITORS_API,{action: ban?"ban":"unban", password: adminPassword||"", email})).json();
+    if(r&&r.ok){ toast(ban?("Banned "+email):("Unbanned "+email)); go("admin"); }
+    else toast("Couldn't update. Make sure you're signed in as admin.");
+  }catch(e){ if(e.message!=="rate_limited") toast("Couldn't update just now."); }
+}
+
+/* --- multi-tab guard (same browser) --- */
+function setupTabGuard(){
+  let ch; try{ ch=new BroadcastChannel("ee_tabs"); }catch(e){ return; }
+  const myId=Math.random().toString(36).slice(2);
+  let warned=false;
+  ch.onmessage=(ev)=>{
+    const m=ev.data||{};
+    if(m.type==="ping" && m.id!==myId){ ch.postMessage({type:"pong", to:m.id}); }
+    if(m.type==="pong" && m.to===myId && !warned){ warned=true; showMultiTab(); }
+  };
+  ch.postMessage({type:"ping", id:myId});
+}
+function showMultiTab(){
+  const el=document.getElementById("focusPop"); if(!el || el.innerHTML) return;
+  el.innerHTML=`<div class="focusbg"><div class="focuscard">
+    <div class="focusemoji">🪟</div>
+    <h2 style="font-size:22px;margin:6px 0 4px">Already open in another tab</h2>
+    <p style="color:var(--muted);font-size:14px;margin:0 0 18px">Efficiency Education looks like it's open in another tab or window. Using it in two places at once can make your progress clash. Please use the other tab, or continue here.</p>
+    <button class="btn wide" onclick="document.getElementById('focusPop').innerHTML=''">Continue here</button>
+  </div></div>`;
 }
 function dataKeyFor(email){ return KEY + "::" + email.trim().toLowerCase(); }
 function validEmail(e){ return /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test((e||"").trim()); }
@@ -1468,6 +1600,7 @@ async function signIn(email){
   await loadActive();
   await verifyPremium({force:true});                 // ask Stripe whether this email is actually a subscriber
   await touchRegistry(email);                        // log the visit after progress + premium are known
+  refreshBanStatus();                                // find out if this account is restricted
   if(pendingUpgrade){
     try{ history.replaceState({}, "", location.pathname); }catch(e){}
     pendingUpgrade=false;
@@ -1507,6 +1640,7 @@ async function loadAllProfiles(){
       const rows = d.visitors.map(v=>({
         email: v.email,
         sets: v.sets, attempts: v.attempts, avg: v.avg, premium: !!v.premium,
+        banned: !!v.banned,
         lastActive: v.lastActive || null,
         online: !!(v.lastActive && (now - v.lastActive) < 120000),
         here: (v.email||"").toLowerCase()===me
@@ -3126,7 +3260,7 @@ function viewAdmin(rows, fb){
         <span>User</span><span>Status</span><span>Where</span><span>Custom sets</span><span>Sessions</span><span>Last active</span>
       </div>
       ${rows.map(r=>`<div class="adminrow">
-        <span class="ausr">${esc(r.email)}${isAdmin(r.email)?' <span class="pf-badge">ADMIN</span>':''}</span>
+        <span class="ausr">${esc(r.email)}${isAdmin(r.email)?' <span class="pf-badge">ADMIN</span>':''}${r.banned?' <span class="pf-badge" style="background:var(--bad)">BANNED</span>':''}${(!isAdmin(r.email)&&r.email&&r.email.indexOf("@")>=0)?` <button class="pf-link" style="font-size:11px;color:${r.banned?'var(--good)':'var(--bad)'}" onclick="banUser('${esc(r.email)}',${r.banned?'false':'true'})">${r.banned?'Unban':'Ban'}</button>`:''}</span>
         <span>${r.online?'<span class="dot on"></span>Active':'<span class="dot"></span>Away'}</span>
         <span class="wsp">${r.here?'This device':'<b>Other device</b>'}</span>
         <span class="mono">${r.sets==null?"·":r.sets}</span>
@@ -3229,6 +3363,7 @@ function setCard(s, st, showStudy){
     <div class="row">
       <button class="btn good sm" onclick="startPlay('${s.id}')">Study</button>
       <button class="btn ghost sm" onclick="go('progress','${s.id}')">Progress</button>
+      ${s.kind==="custom"?`<button class="btn ghost sm" onclick="shareSet('${s.id}')">Share</button>`:""}
     </div>
   </div>`;
 }
@@ -3299,6 +3434,7 @@ function viewLibrary(){
     <label class="search"><svg viewBox="0 0 24 24"><circle cx="11" cy="11" r="7"/><path d="m20 20-3.5-3.5"/></svg>
       <input id="libq" placeholder="Search topics, sets and questions" value="${esc(libSearch)}" oninput="libSearch=this.value;refreshLibGrid()"></label>
     <button class="btn" onclick="go('create')">+ New set</button>
+    <button class="btn ghost" onclick="openImport('')">↓ Add shared set</button>
   </div>
   <div id="libgrid">${libBody()}</div>`;
 }
@@ -4250,6 +4386,7 @@ function unstage(i){ draft.staged.splice(i,1); refreshStaged(); }
 function clearDraft(){ const wasEditing=!!editingSetId; resetDraft(); go(wasEditing?"library":"create"); }
 
 function saveSet(){
+  if(accountRestricted){ toast("Your account is restricted from creating sets."); return; }
   const name = (document.getElementById("setName")?.value || draft.name).trim();
   if(!name){ toast("Give your set a name"); return; }
   const staged = draft.staged.filter(s=>(s.prompt||"").trim());
@@ -6021,8 +6158,10 @@ function setupFocusGuard(){
 
 (async function boot(){
   showSplash("Getting your work ready");
-  loadAiConfig(); await loadUI(); await loadPay(); setupSidebarResize(); setupFocusGuard();
+  loadAiConfig(); await loadUI(); await loadPay(); setupSidebarResize(); setupFocusGuard(); setupTabGuard();
   pendingUpgrade = /[?&#](upgrade=1|upgraded=1|premium=success)/i.test(location.search + location.hash);
+  const _shareCode = (new URLSearchParams(location.search)).get("set");
+  if(_shareCode){ setTimeout(()=>{ try{ openImport(_shareCode); }catch(e){} }, 1000); }  // offer to import a shared set
   const sess = await baseGet(SESSION_KEY);
   if(sess){
     try{ const s=JSON.parse(sess);
