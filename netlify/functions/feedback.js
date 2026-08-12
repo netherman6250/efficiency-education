@@ -20,6 +20,26 @@ async function getJSON(s, key) {
 }
 function ok(headers, obj) { return { statusCode: 200, headers, body: JSON.stringify(obj) }; }
 
+async function isBanned(s, email) {
+  email = (email || "").trim().toLowerCase();
+  if (!email) return false;
+  return !!(await getJSON(s, "ban_" + sha(email)));
+}
+async function underLimit(s, ip, bucket, maxPerMin) {
+  if (!ip) return true;
+  const key = "rl_" + bucket + "_" + sha(ip);
+  const now = Date.now();
+  const rec = (await getJSON(s, key)) || { count: 0, start: now };
+  if (now - rec.start > 60000) { rec.count = 0; rec.start = now; }
+  rec.count++;
+  await s.setJSON(key, rec);
+  return rec.count <= maxPerMin;
+}
+function clientIp(event) {
+  const h = event.headers || {};
+  return (h["x-nf-client-connection-ip"] || (h["x-forwarded-for"] || "").split(",")[0] || "").trim();
+}
+
 exports.handler = async (event) => {
   connectLambda(event);
   const headers = { "Content-Type": "application/json", "Cache-Control": "no-store" };
@@ -35,6 +55,9 @@ exports.handler = async (event) => {
   try {
     // ---- submit feedback ---------------------------------------------------
     if (action === "submit") {
+      if (await isBanned(s, body.email)) return ok(headers, { ok: false, error: "restricted" });
+      if (!(await underLimit(s, clientIp(event), "fb", 10)))
+        return { statusCode: 429, headers, body: JSON.stringify({ error: "rate_limited" }) };
       const message = String(body.message || "").slice(0, 4000).trim();
       if (!message) return { statusCode: 400, headers, body: JSON.stringify({ error: "empty" }) };
       const email = String(body.email || "").trim().toLowerCase().slice(0, 200);

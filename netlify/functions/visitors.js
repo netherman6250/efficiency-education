@@ -27,6 +27,16 @@ async function getJSON(s, key) {
 function ok(headers, obj) { return { statusCode: 200, headers, body: JSON.stringify(obj) }; }
 const num = (v) => (typeof v === "number" && isFinite(v) ? v : null);
 
+// Returns "ok", "admin_not_set", or "bad_password".
+async function verifyAdmin(s, password) {
+  const cred = await getJSON(s, ADMIN_KEY);
+  if (!cred || !cred.hash) return "admin_not_set";
+  const a = Buffer.from(sha(String(password || "")));
+  const b = Buffer.from(cred.hash);
+  if (a.length !== b.length || !crypto.timingSafeEqual(a, b)) return "bad_password";
+  return "ok";
+}
+
 exports.handler = async (event) => {
   connectLambda(event);
   const headers = { "Content-Type": "application/json", "Cache-Control": "no-store" };
@@ -57,24 +67,35 @@ exports.handler = async (event) => {
       return ok(headers, { ok: true });
     }
 
-    // ---- admin: list everyone ---------------------------------------------
+    // ---- admin: list everyone (with banned flag) --------------------------
     if (action === "list") {
-      const cred = await getJSON(s, ADMIN_KEY);
-      if (!cred || !cred.hash) return ok(headers, { ok: false, error: "admin_not_set" });
-      const a = Buffer.from(sha(String(body.password || "")));
-      const b = Buffer.from(cred.hash);
-      if (a.length !== b.length || !crypto.timingSafeEqual(a, b))
-        return ok(headers, { ok: false, error: "bad_password" });
+      const v = await verifyAdmin(s, body.password);
+      if (v !== "ok") return ok(headers, { ok: false, error: v });
 
       const listing = await s.list({ prefix: "visitor_" });
       const keys = (listing && listing.blobs) || [];
       const visitors = [];
       for (const bl of keys) {
         const r = await getJSON(s, bl.key);
-        if (r) visitors.push(r);
+        if (r) {
+          r.banned = !!(await getJSON(s, "ban_" + sha((r.email || "").trim().toLowerCase())));
+          visitors.push(r);
+        }
       }
       visitors.sort((x, y) => (y.lastActive || 0) - (x.lastActive || 0));
       return ok(headers, { ok: true, visitors });
+    }
+
+    // ---- admin: ban / unban an account ------------------------------------
+    if (action === "ban" || action === "unban") {
+      const v = await verifyAdmin(s, body.password);
+      if (v !== "ok") return ok(headers, { ok: false, error: v });
+      const email = (body.email || "").trim().toLowerCase();
+      if (!email || email.indexOf("@") < 0) return ok(headers, { ok: false, error: "email required" });
+      const key = "ban_" + sha(email);
+      if (action === "ban") await s.setJSON(key, { email, at: Date.now() });
+      else await s.delete(key);
+      return ok(headers, { ok: true });
     }
 
     return { statusCode: 400, headers, body: JSON.stringify({ error: "unknown_action" }) };
